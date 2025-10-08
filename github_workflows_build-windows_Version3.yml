@@ -1,0 +1,85 @@
+# Build RTKLIB on Windows (MSYS2/Mingw and MSBuild fallback) and upload .exe artifacts
+# Trigger: push to any branch or manual workflow_dispatch
+on:
+  push:
+    branches: [ "**" ]
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    name: Build RTKLIB (Windows)
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Setup MSYS2 (mingw64) and build with make (attempt)
+      uses: msys2/setup-msys2@v2
+      with:
+        update: true
+        install: >
+          mingw-w64-x86_64-gcc
+          mingw-w64-x86_64-make
+          mingw-w64-x86_64-pkg-config
+          mingw-w64-x86_64-winpthreads-git
+      continue-on-error: true
+
+    - name: Build (MSYS2 / mingw) - attempt make
+      shell: bash
+      continue-on-error: true
+      run: |
+        echo "Tentando construir com MSYS2/mingw (make)..."
+        if [ -f Makefile ]; then
+          make -j2 || true
+        elif [ -f app/Makefile ]; then
+          cd app
+          make -j2 || true
+          cd ..
+        elif [ -f makefile ]; then
+          make -j2 || true
+        else
+          echo "Nenhum Makefile encontrado na raiz ou em app/ - pulando passo mingw."
+        fi
+
+    - name: Find Visual Studio solution and build with MSBuild (fallback)
+      shell: powershell
+      run: |
+        $sln = Get-ChildItem -Path . -Filter *.sln -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($null -ne $sln) {
+          Write-Host "Found solution: $($sln.FullName)"
+          msbuild $sln.FullName /p:Configuration=Release /m
+        } else {
+          Write-Host "No .sln found - skipping MSBuild step."
+        }
+
+    - name: Collect exe files
+      shell: powershell
+      run: |
+        $out = Get-ChildItem -Path . -Include *.exe -Recurse -ErrorAction SilentlyContinue |
+               Where-Object { $_.FullName -notmatch "\\.git\\" } |
+               Select-Object -ExpandProperty FullName
+        if ($out) {
+          Write-Host "Found executables:"
+          $out | ForEach-Object { Write-Host $_ }
+        } else {
+          Write-Host "No .exe files found."
+        }
+        $list = @()
+        foreach ($f in $out) {
+          $dest = Join-Path $env:GITHUB_WORKSPACE (Split-Path $f -Leaf)
+          Copy-Item -Path $f -Destination $dest -Force
+          $list += (Split-Path $f -Leaf)
+        }
+        if ($list.Count -gt 0) {
+          $list | Out-File -FilePath artifacts_list.txt -Encoding UTF8
+        }
+
+    - name: Upload built executables (artifacts)
+      uses: actions/upload-artifact@v4
+      with:
+        name: rtklib-windows-executables
+        path: |
+          *.exe
+          artifacts_list.txt
